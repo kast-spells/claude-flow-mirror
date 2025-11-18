@@ -287,7 +287,88 @@ private async registerBuiltInTools(): Promise<void> {
 - **Dynamic tool loading** based on availability
 - **Dependency injection** for loosely coupled tools
 
-### 1.4 MCP 2025-11 Enhancements
+### 1.4 MCP Server Connection State Machine
+
+The MCP server manages client connections through a well-defined state machine that handles initialization, authentication, and session lifecycle.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected
+
+    Disconnected --> Connecting: connect() called
+    Connecting --> Authenticating: transport established
+    Connecting --> Failed: connection timeout
+
+    Authenticating --> Handshaking: credentials valid
+    Authenticating --> Failed: authentication error
+
+    Handshaking --> Negotiating: handshake received
+    Handshaking --> Failed: handshake timeout
+
+    Negotiating --> Active: version agreed
+    Negotiating --> Failed: incompatible version
+
+    Active --> Idle: no active requests
+    Idle --> Active: request received
+    Active --> Active: request processing
+
+    Active --> Reconnecting: connection lost
+    Idle --> Reconnecting: heartbeat failed
+    Reconnecting --> Connecting: retry attempt
+    Reconnecting --> Failed: max retries
+
+    Active --> Terminating: disconnect() called
+    Idle --> Terminating: session timeout
+    Terminating --> Disconnected: cleanup complete
+
+    Failed --> Disconnected: error logged
+    Disconnected --> [*]
+
+    state Active {
+        [*] --> Processing
+        Processing --> RateLimiting: check limits
+        RateLimiting --> Executing: allowed
+        RateLimiting --> Throttled: rate exceeded
+        Throttled --> Processing: backoff complete
+        Executing --> Processing: response sent
+    }
+
+    note right of Connecting
+        Establishing transport
+        TCP/HTTP/Stdio
+    end note
+
+    note right of Authenticating
+        Verify credentials
+        Create session token
+    end note
+
+    note right of Negotiating
+        Protocol version
+        Capability exchange
+    end note
+
+    note right of Active
+        Normal operation
+        Processing requests
+    end note
+```
+
+**Connection State Details:**
+
+| State | Description | Timeout | Recovery Action |
+|-------|-------------|---------|-----------------|
+| **Connecting** | Establishing transport | 10s | Retry with backoff |
+| **Authenticating** | Validating credentials | 5s | Return auth error |
+| **Handshaking** | Protocol negotiation | 10s | Fallback to legacy |
+| **Negotiating** | Capability exchange | 5s | Use minimal capabilities |
+| **Active** | Processing requests | None | Rate limiting enforced |
+| **Idle** | No active requests | 30min | Auto-terminate session |
+| **Reconnecting** | Attempting recovery | 60s | Exponential backoff |
+
+**Code Reference:** `src/mcp/server.ts:271-355` (request handling), `src/mcp/server-mcp-2025.ts:163-229` (handshake)
+
+### 1.5 MCP 2025-11 Enhancements
 
 #### 1.4.1 Version Negotiation (server-mcp-2025.ts:163-229)
 
@@ -1110,6 +1191,105 @@ export class HookMatcher {
 4. **Parallel execution** for independent hooks
 5. **Result aggregation** and error handling
 
+### 3.6 Hook Execution State Machine
+
+Hooks execute through a well-defined state machine that ensures proper sequencing, error handling, and rollback capabilities.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+
+    Idle --> Triggered: event received
+    Triggered --> Filtering: match hooks
+    Filtering --> Idle: no matches
+
+    Filtering --> Queued: hooks matched
+    Queued --> Sorting: prioritize hooks
+    Sorting --> Executing: start execution
+
+    Executing --> PreExecution: pre-hooks
+    PreExecution --> MainExecution: validation passed
+    PreExecution --> Failed: validation failed
+
+    MainExecution --> PostExecution: operation complete
+    MainExecution --> Failed: operation error
+
+    PostExecution --> Finalizing: post-hooks
+    Finalizing --> Completed: all hooks done
+    Finalizing --> PartialSuccess: some hooks failed
+
+    Failed --> RollingBack: rollback enabled
+    RollingBack --> RolledBack: rollback complete
+    RollingBack --> RollbackFailed: rollback error
+
+    Completed --> Idle
+    PartialSuccess --> Idle
+    RolledBack --> Idle
+    RollbackFailed --> Idle
+
+    state Executing {
+        [*] --> Sequential
+        Sequential --> Parallel: parallelizable
+        Parallel --> Aggregating: all complete
+        Aggregating --> [*]
+    }
+
+    state PreExecution {
+        [*] --> Validation
+        Validation --> ContextEnrichment
+        ContextEnrichment --> [*]
+    }
+
+    state PostExecution {
+        [*] --> MetricsCollection
+        MetricsCollection --> StateUpdate
+        StateUpdate --> EventEmission
+        EventEmission --> [*]
+    }
+
+    note right of Triggered
+        Hook event detected
+        Extract context
+    end note
+
+    note right of Filtering
+        Pattern matching
+        Capability check
+    end note
+
+    note right of Executing
+        Execute hook chain
+        Pre → Main → Post
+    end note
+
+    note right of RollingBack
+        Undo side effects
+        Restore state
+    end note
+```
+
+**Hook Execution States:**
+
+| State | Entry Condition | Exit Condition | Side Effects |
+|-------|----------------|----------------|--------------|
+| **Idle** | No pending hooks | Event received | None |
+| **Triggered** | Event emitted | Hooks matched | Load hook registry |
+| **Filtering** | Hook list available | Pattern match complete | Filter hooks by criteria |
+| **Queued** | Hooks matched | Priority sorted | Queue management |
+| **Executing** | Execution started | All hooks done | Execute handler functions |
+| **Failed** | Hook error | Rollback initiated | Log error, update metrics |
+| **RollingBack** | Failure detected | State restored | Undo operations |
+| **Completed** | Success | Return to idle | Emit completion event |
+
+**Error Handling:**
+
+- **Validation errors**: Halt execution, return error response
+- **Execution errors**: Continue or halt based on `errorStrategy` (continue/halt)
+- **Rollback errors**: Log critical error, emit alert
+- **Timeout errors**: Cancel hook, mark as timed out
+
+**Code Reference:** `src/services/agentic-flow-hooks/index.ts:69-93` (pipeline creation), `src/hooks/hook-matchers.ts:89-174` (pattern matching)
+
 ---
 
 ## 4. Memory & State Management
@@ -1411,7 +1591,133 @@ async updateKnowledgeBase(entry: SwarmMemoryEntry): Promise<void> {
 - **Contributor tracking**: Track knowledge sources
 - **Version history**: Track updates over time
 
-### 4.5 API Surface
+### 4.5 Memory Backend State Machine
+
+Memory backends (SQLite, Markdown, Hybrid) follow a state machine for connection management, transactions, and error recovery.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Uninitialized
+
+    Uninitialized --> Initializing: initialize() called
+    Initializing --> Connecting: backend selected
+    Connecting --> Connected: connection established
+    Connecting --> Failed: connection error
+
+    Connected --> Ready: schema validated
+    Connected --> Migrating: schema update needed
+    Migrating --> Ready: migration complete
+    Migrating --> Failed: migration error
+
+    Ready --> Idle: no operations
+    Idle --> Reading: read operation
+    Idle --> Writing: write operation
+    Idle --> Querying: query operation
+
+    Reading --> Idle: read complete
+    Writing --> Idle: write complete
+    Querying --> Idle: query complete
+
+    Reading --> Failed: read error
+    Writing --> Failed: write error
+    Querying --> Failed: query error
+
+    Writing --> Syncing: cross-backend sync
+    Syncing --> Idle: sync complete
+    Syncing --> Failed: sync error
+
+    Idle --> Optimizing: maintenance triggered
+    Optimizing --> Idle: optimization done
+    Optimizing --> Failed: optimization error
+
+    Failed --> Recovering: retry possible
+    Recovering --> Idle: recovery successful
+    Recovering --> Disconnected: recovery failed
+
+    Idle --> Disconnecting: shutdown requested
+    Disconnecting --> Disconnected: cleanup complete
+    Disconnected --> [*]
+
+    state Ready {
+        [*] --> CacheWarming
+        CacheWarming --> IndexBuilding
+        IndexBuilding --> ReadyForOps
+        ReadyForOps --> [*]
+    }
+
+    state Writing {
+        [*] --> Validating
+        Validating --> BeginTransaction
+        BeginTransaction --> Persisting
+        Persisting --> CommitTransaction
+        CommitTransaction --> [*]
+    }
+
+    state Syncing {
+        [*] --> PrimarySync
+        PrimarySync --> SecondarySyncs
+        SecondarySyncs --> VerifySyncs
+        VerifySyncs --> [*]
+    }
+
+    note right of Initializing
+        Load backend config
+        Validate settings
+    end note
+
+    note right of Ready
+        Accept operations
+        Cache warmed
+    end note
+
+    note right of Writing
+        ACID transactions
+        WAL journaling
+    end note
+
+    note right of Syncing
+        Hybrid backend
+        Multi-target sync
+    end note
+```
+
+**Memory Backend States:**
+
+| State | Description | Typical Duration | Recovery Path |
+|-------|-------------|------------------|---------------|
+| **Uninitialized** | Initial state | N/A | Initialize |
+| **Connecting** | Establishing DB connection | 100-500ms | Retry 3x with backoff |
+| **Migrating** | Schema migrations | 1-30s | Rollback transaction |
+| **Ready** | Normal operation | Indefinite | N/A |
+| **Reading** | Fetch operations | 1-50ms | Retry on transient errors |
+| **Writing** | Persist operations | 15-75ms | Rollback transaction |
+| **Syncing** | Cross-backend sync | 50-200ms | Mark dirty, retry later |
+| **Optimizing** | Maintenance (VACUUM, ANALYZE) | 1-60s | Cancel on timeout |
+| **Recovering** | Error recovery | Variable | Fallback to read-only |
+
+**Backend-Specific Behaviors:**
+
+**SQLite Backend:**
+- **Connection pooling**: 5-20 connections
+- **WAL mode**: Write-Ahead Logging for concurrency
+- **PRAGMA optimizations**: `journal_mode=WAL`, `synchronous=NORMAL`
+- **Transaction management**: Auto-commit or explicit transactions
+
+**Markdown Backend:**
+- **File locking**: Exclusive locks for writes
+- **Atomic writes**: Write to temp file, then rename
+- **Indexing**: Metadata extracted on write
+- **Backup**: Automatic timestamped backups
+
+**Hybrid Backend:**
+- **Primary**: SQLite (fast queries)
+- **Secondary**: Markdown (human-readable backup)
+- **Sync strategy**: Async, best-effort
+- **Consistency**: Eventually consistent
+
+**Code Reference:** `src/memory/backends/sqlite.ts` (SQLite), `src/memory/backends/markdown.ts` (Markdown), `src/memory/backends/hybrid.ts` (Hybrid)
+
+### 4.6 API Surface
 
 #### IMemoryManager Interface
 ```typescript

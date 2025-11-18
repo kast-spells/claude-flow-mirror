@@ -525,6 +525,115 @@ export interface AgentCapabilities {
 | `coordinator` | coordination, orchestration | Multi-agent workflow management |
 | `reviewer` | review, analysis, documentation | Code review, security audits |
 
+### Task Lifecycle State Machine
+
+Tasks progress through a well-defined lifecycle with clear state transitions, dependency management, and error recovery.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+
+    Created --> Validating: validate task
+    Validating --> Queued: validation passed
+    Validating --> Invalid: validation failed
+
+    Queued --> WaitingDependencies: has dependencies
+    Queued --> Ready: no dependencies
+
+    WaitingDependencies --> Ready: dependencies met
+    WaitingDependencies --> Blocked: dependency failed
+
+    Ready --> Assigned: agent assigned
+    Assigned --> Running: execution started
+
+    Running --> Executing: processing
+    Executing --> Completed: success
+    Executing --> Failed: error occurred
+    Executing --> Timeout: time limit exceeded
+
+    Failed --> Retrying: retry attempt
+    Retrying --> Queued: queued for retry
+    Retrying --> Abandoned: max retries exceeded
+
+    Timeout --> Retrying: recoverable
+    Timeout --> Abandoned: unrecoverable
+
+    Blocked --> Cancelled: dependency chain broken
+    Invalid --> Cancelled: cannot be fixed
+
+    Completed --> [*]
+    Abandoned --> [*]
+    Cancelled --> [*]
+
+    state Running {
+        [*] --> PreExecution
+        PreExecution --> MainExecution
+        MainExecution --> PostExecution
+        PostExecution --> [*]
+    }
+
+    state Executing {
+        [*] --> ResourceAllocation
+        ResourceAllocation --> TaskExecution
+        TaskExecution --> ResultValidation
+        ResultValidation --> [*]
+    }
+
+    note right of Created
+        Task definition created
+        Initial validation pending
+    end note
+
+    note right of WaitingDependencies
+        Blocked on prerequisites
+        Monitoring dependency status
+    end note
+
+    note right of Running
+        Active execution
+        Resource utilization tracked
+    end note
+
+    note right of Failed
+        Error captured
+        Retry logic evaluating
+    end note
+```
+
+**Task State Details:**
+
+| State | Description | Typical Duration | Transition Conditions |
+|-------|-------------|------------------|----------------------|
+| **Created** | Task initialized | <1ms | Immediate validation |
+| **Validating** | Schema validation | 5-20ms | Valid → Queued, Invalid → Cancelled |
+| **Queued** | Awaiting execution | Variable | Agent available → Assigned |
+| **WaitingDependencies** | Blocked on prerequisites | Variable | Dependencies met → Ready |
+| **Ready** | Ready for assignment | <100ms | Agent assigned → Assigned |
+| **Assigned** | Agent allocated | <50ms | Execution started → Running |
+| **Running** | Active execution | Variable | Success → Completed, Error → Failed |
+| **Failed** | Execution failed | N/A | Retry → Retrying, Abandon → Abandoned |
+| **Retrying** | Retry attempt | Variable | Requeued → Queued |
+| **Completed** | Successfully finished | N/A | Terminal state |
+| **Abandoned** | Permanently failed | N/A | Terminal state |
+| **Cancelled** | User/system cancelled | N/A | Terminal state |
+
+**State Transition Triggers:**
+
+- **Dependencies met**: All prerequisite tasks completed successfully
+- **Agent available**: Free agent matches task requirements
+- **Timeout exceeded**: Task duration > configured timeout
+- **Max retries**: Retry count >= configured maximum
+- **Manual intervention**: User cancellation or priority override
+
+**Error Recovery:**
+
+- **Transient errors**: Automatic retry with exponential backoff (3 attempts default)
+- **Resource errors**: Request reallocation, queue for retry
+- **Dependency errors**: Mark blocked, wait for dependency resolution
+- **Timeout errors**: Cancel long-running tasks, free resources
+
+**Code Reference:** `src/swarm/executor.ts:117-167` (task execution), `src/coordination/swarm-coordinator.ts:247-299` (task management)
+
 ### Swarm Coordination Patterns
 
 **1. Hierarchical Coordination**
@@ -713,6 +822,147 @@ sequenceDiagram
 
     SPARC_COORD-->>User: Workflow complete + metrics
 ```
+
+### SPARC Phase Transition State Machine
+
+The SPARC workflow progresses through five distinct phases, with strict dependency management and quality gates between phases.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Initialized
+
+    Initialized --> Specification: workflow started
+    Specification --> SpecificationReview: phase complete
+    SpecificationReview --> Pseudocode: review passed
+    SpecificationReview --> Specification: review failed
+
+    Pseudocode --> PseudocodeReview: phase complete
+    PseudocodeReview --> Architecture: review passed
+    PseudocodeReview --> Pseudocode: review failed
+
+    Architecture --> ArchitectureReview: phase complete
+    ArchitectureReview --> Refinement: review passed
+    ArchitectureReview --> Architecture: review failed
+
+    Refinement --> RefinementReview: TDD complete
+    RefinementReview --> Completion: tests passing
+    RefinementReview --> Refinement: tests failing
+
+    Completion --> FinalReview: deliverables ready
+    FinalReview --> Completed: validation passed
+    FinalReview --> Completion: validation failed
+
+    Completed --> [*]
+
+    state Specification {
+        [*] --> GatheringRequirements
+        GatheringRequirements --> WritingUserStories
+        WritingUserStories --> DefiningAcceptanceCriteria
+        DefiningAcceptanceCriteria --> [*]
+    }
+
+    state Pseudocode {
+        [*] --> DesigningAlgorithms
+        DesigningAlgorithms --> CreatingLogicFlows
+        CreatingLogicFlows --> DefiningDataStructures
+        DefiningDataStructures --> [*]
+    }
+
+    state Architecture {
+        [*] --> DesigningSystemArchitecture
+        DesigningSystemArchitecture --> CreatingComponentDiagrams
+        CreatingComponentDiagrams --> SpecifyingAPIs
+        SpecifyingAPIs --> [*]
+    }
+
+    state Refinement {
+        [*] --> WritingTests
+        WritingTests --> ImplementingCode
+        ImplementingCode --> Refactoring
+        Refactoring --> RunningTests
+        RunningTests --> WritingTests: tests failing
+        RunningTests --> [*]: tests passing
+    }
+
+    state Completion {
+        [*] --> RunningIntegrationTests
+        RunningIntegrationTests --> GeneratingDocumentation
+        GeneratingDocumentation --> ValidatingDeliverables
+        ValidatingDeliverables --> [*]
+    }
+
+    note right of Specification
+        Phase 1
+        Requirements analysis
+        User stories created
+    end note
+
+    note right of Architecture
+        Phase 3
+        System design
+        Component structure
+    end note
+
+    note right of Refinement
+        Phase 4: TDD Cycle
+        Red-Green-Refactor
+        Test coverage target: 80%
+    end note
+
+    note right of Completed
+        All phases complete
+        Deliverables validated
+        Ready for deployment
+    end note
+```
+
+**SPARC Phase Details:**
+
+| Phase | Entry Criteria | Exit Criteria | Quality Gate | Typical Duration |
+|-------|---------------|---------------|--------------|------------------|
+| **Specification** | Workflow initialized | Requirements documented | Review approval | 30-60 min |
+| **Pseudocode** | Spec review passed | Algorithms designed | Logic validation | 20-40 min |
+| **Architecture** | Pseudocode approved | System designed | Architecture review | 40-80 min |
+| **Refinement** | Architecture approved | Tests passing (>80% coverage) | TDD validation | 60-120 min |
+| **Completion** | Tests passing | Deliverables validated | Final QA approval | 30-60 min |
+
+**Phase Transition Rules:**
+
+- **Forward transitions**: Only allowed when quality gate passes
+- **Backward transitions**: Allowed for rework based on review feedback
+- **Parallel execution**: Architecture can start while Pseudocode review in progress
+- **Blocking conditions**: Failed quality gate blocks forward progress
+- **Timeout handling**: Phase timeout triggers coordinator intervention
+
+**Quality Gates:**
+
+1. **Specification Review**: Requirements complete, user stories well-defined, acceptance criteria clear
+2. **Pseudocode Review**: Algorithms sound, logic flow validated, data structures appropriate
+3. **Architecture Review**: System design scalable, components well-defined, APIs documented
+4. **TDD Validation**: Tests passing, coverage >80%, code quality metrics met
+5. **Final QA**: Integration tests passing, documentation complete, deliverables validated
+
+**State Persistence:**
+
+Each phase transition is persisted to memory for recovery and analytics:
+
+```json
+{
+  "currentPhase": "refinement",
+  "phaseHistory": [
+    {"phase": "specification", "status": "completed", "timestamp": "2025-11-18T10:00:00Z"},
+    {"phase": "pseudocode", "status": "completed", "timestamp": "2025-11-18T10:30:00Z"},
+    {"phase": "architecture", "status": "completed", "timestamp": "2025-11-18T11:00:00Z"}
+  ],
+  "qualityGates": {
+    "specificationReview": {"passed": true, "reviewedBy": "coordinator"},
+    "pseudocodeReview": {"passed": true, "reviewedBy": "architect"},
+    "architectureReview": {"passed": true, "reviewedBy": "lead-architect"}
+  }
+}
+```
+
+**Code Reference:** `src/modes/SparcInit.ts` (phase initialization), `src/swarm/sparc-executor.ts` (phase execution)
 
 ### SPARC Agent Specialization
 

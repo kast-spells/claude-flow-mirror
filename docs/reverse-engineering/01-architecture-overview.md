@@ -678,6 +678,179 @@ agenticHookManager.register({
    - Location: `src/mcp/ruv-swarm-tools.ts`, `src/reasoningbank/reasoningbank-adapter.js`
    - Wraps external APIs in consistent interface
 
+### 3.4 State Machine Patterns
+
+#### 3.4.1 Agent Lifecycle State Machine
+
+The agent lifecycle follows a well-defined state machine that ensures proper resource management and error handling throughout the agent's lifetime.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: spawnAgent() called
+
+    Pending --> Initializing: resources allocated
+    Pending --> Failed: allocation failed
+
+    Initializing --> Creating: terminal spawned
+    Creating --> Registering: memory bank created
+    Registering --> Ready: coordination setup
+
+    Initializing --> Failed: terminal spawn failed
+    Creating --> Failed: memory creation failed
+    Registering --> Failed: registration failed
+
+    Ready --> Idle: no tasks assigned
+    Idle --> Busy: task assigned
+    Busy --> Idle: task completed
+    Busy --> Error: task failed
+
+    Error --> Idle: error recovered
+    Error --> Failed: max retries exceeded
+
+    Idle --> Terminating: shutdown requested
+    Busy --> Terminating: forced shutdown
+    Error --> Terminating: cleanup needed
+
+    Terminating --> Cleaning: resources released
+    Cleaning --> Terminated: cleanup complete
+
+    Failed --> Terminated: error logged
+    Terminated --> [*]
+
+    note right of Pending
+        Initial state
+        Waiting for resources
+    end note
+
+    note right of Ready
+        Agent registered
+        Awaiting tasks
+    end note
+
+    note right of Error
+        Recoverable state
+        Retry logic active
+    end note
+
+    note right of Failed
+        Terminal state
+        Unrecoverable error
+    end note
+```
+
+**Agent State Transitions:**
+
+| From State | To State | Condition | Actions |
+|------------|----------|-----------|---------|
+| Pending | Initializing | Resources allocated | Create terminal, memory bank |
+| Initializing | Creating | Terminal spawned | Initialize session |
+| Creating | Registering | Memory created | Register with coordinator |
+| Registering | Ready | Registration complete | Join swarm, emit event |
+| Ready | Idle | No tasks | Wait for assignment |
+| Idle | Busy | Task assigned | Execute task |
+| Busy | Idle | Task complete | Update metrics, free resources |
+| Busy | Error | Task failed | Log error, increment retry count |
+| Error | Idle | Retry successful | Clear error state |
+| Error | Failed | Max retries | Mark as failed, cleanup |
+| * | Terminating | Shutdown signal | Begin graceful shutdown |
+| Terminating | Cleaning | Resources released | Close connections, save state |
+| Cleaning | Terminated | Cleanup complete | Emit termination event |
+
+**Error Recovery Strategies:**
+
+- **Transient errors**: Exponential backoff retry (3 attempts)
+- **Resource errors**: Request reallocation, fallback to degraded mode
+- **Network errors**: Reconnect with circuit breaker protection
+- **Timeout errors**: Cancel operation, release resources
+
+**Code Reference:** `src/core/orchestrator.ts:469-508` (spawnAgent), `src/agents/agent-manager.ts` (lifecycle management)
+
+#### 3.4.2 Circuit Breaker State Machine
+
+The circuit breaker pattern protects the system from cascading failures by monitoring operation success rates and failing fast when threshold is exceeded.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+
+    Closed --> Open: failure_count >= threshold
+    Closed --> Closed: operation_success
+
+    Open --> HalfOpen: reset_timeout_elapsed
+    Open --> Open: operation_rejected
+
+    HalfOpen --> Closed: test_success
+    HalfOpen --> Open: test_failure
+    HalfOpen --> HalfOpen: within_test_limit
+
+    state Closed {
+        [*] --> Monitoring
+        Monitoring --> Recording: operation_executed
+        Recording --> Monitoring: record_complete
+    }
+
+    state Open {
+        [*] --> Rejecting
+        Rejecting --> WaitingForReset: requests_blocked
+        WaitingForReset --> ReadyToTest: timeout_elapsed
+    }
+
+    state HalfOpen {
+        [*] --> Testing
+        Testing --> Evaluating: test_completed
+        Evaluating --> DecisionPoint: all_tests_done
+    }
+
+    note right of Closed
+        Normal operation
+        Requests pass through
+        Failures tracked
+    end note
+
+    note right of Open
+        Fast fail mode
+        All requests rejected
+        Waiting for reset timeout
+    end note
+
+    note right of HalfOpen
+        Recovery testing
+        Limited requests allowed
+        Evaluating system health
+    end note
+```
+
+**Circuit Breaker Configuration:**
+
+```typescript
+interface CircuitBreakerConfig {
+  threshold: number;          // Failures before opening (default: 5)
+  timeout: number;            // Reset timeout in ms (default: 30000)
+  resetTimeout: number;       // Full reset timeout (default: 60000)
+  halfOpenRequests: number;   // Test requests in half-open (default: 3)
+  monitoringWindow: number;   // Sliding window in ms (default: 60000)
+}
+```
+
+**Circuit Breaker State Details:**
+
+| State | Behavior | Entry Actions | Exit Actions |
+|-------|----------|---------------|--------------|
+| **Closed** | Pass all requests | Reset failure count | Record metrics |
+| **Open** | Reject all requests | Start reset timer | Log circuit open event |
+| **HalfOpen** | Allow test requests | Initialize test counter | Evaluate test results |
+
+**Transition Triggers:**
+
+- **Closed → Open**: `failures >= threshold` within monitoring window
+- **Open → HalfOpen**: Reset timeout elapsed (default 30s)
+- **HalfOpen → Closed**: All test requests succeed
+- **HalfOpen → Open**: Any test request fails
+
+**Code Reference:** `src/utils/helpers.ts` (circuit breaker implementation), `src/core/orchestrator.ts:336-348` (usage)
+
+---
+
 #### 3.3.2 Concurrency Patterns
 
 1. **Session Forking**: Parallel agent spawning (10-20x speedup)
